@@ -20,29 +20,50 @@ class Compaction {
  public:
   ~Compaction();
 
-  // Return the level that is being compacted.  Inputs from "level"
-  // will be merged.
-  int level() const { return level_; }
+  // Returns the lowest level that is being compacted.  Inputs between
+  // "base_level" and "output_level" will be merged.
+  int base_level() const { return base_level_; }
 
   // Outputs will go to this level
-  int output_level() const { return out_level_; }
+  int output_level() const { return output_level_; }
+
+  // Returns the number of input levels in this compaction.
+  // This number equals to "output_level() - base_level() + 1".
+  int input_levels() const { return input_levels_; }
 
   // Return the object that holds the edits to the descriptor done
   // by this compaction.
-  VersionEdit* edit() { return edit_; }
+  VersionEdit* edit() const { return edit_; }
 
-  // "which" must be either 0 or 1
-  int num_input_files(int which) const { return inputs_[which].size(); }
+  // Returns the number of input files at level "base_level() + which".
+  // The function will return 0 if when "which" < 0 or >= "input_levels()".
+  int num_input_files(int which) const {
+    if (which >= 0 && which < input_levels_) {
+      return inputs_[which].size();
+    }
+    return 0;
+  }
 
   // Returns input version of the compaction
   Version* input_version() const { return input_version_; }
 
+  // Returns the ColumnFamilyData associated with the compaction.
   ColumnFamilyData* column_family_data() const { return cfd_; }
 
-  // Return the ith input file at "level()+which" ("which" must be 0 or 1).
-  FileMetaData* input(int which, int i) const { return inputs_[which][i]; }
+  // Returns the ith input file at level "base_level() + which",
+  // and "which" must be >= 0 and < "input_levels()".
+  FileMetaData* input(int which, int i) const {
+    assert(which < input_levels_ && which >= 0);
+    return inputs_[which][i];
+  }
 
-  std::vector<FileMetaData*>* inputs(int which) { return &inputs_[which]; }
+  // Returns the list of file meta data associated with level
+  // "base_level() + which", where "which" must be >= 0 and
+  // < "input_levels()"
+  std::vector<FileMetaData*>* const inputs(int which) {
+    assert(which < input_levels_ && which >= 0);
+    return &inputs_[which];
+  }
 
   // Maximum size of files to build during this compaction.
   uint64_t MaxOutputFileSize() const { return max_output_file_size_; }
@@ -54,16 +75,17 @@ class Compaction {
   // moving a single input file to the next level (no merging or splitting)
   bool IsTrivialMove() const;
 
-  // If true, just delete all files in inputs_[0]
-  bool IsDeletionCompaction() const;
+  // If true, then the comaction can be done by simply deleting input files.
+  bool IsDeletionCompaction() const {
+    return deletion_compaction_;
+  }
 
   // Add all inputs to this compaction as delete operations to *edit.
   void AddInputDeletions(VersionEdit* edit);
 
-  // Returns true if the information we have available guarantees that
-  // the compaction is producing data in "level+1" for which no data exists
-  // in levels greater than "level+1".
-  bool IsBaseLevelForKey(const Slice& user_key);
+  // Returns true if the available information we have guarantees that
+  // the input "user_key" does not exist in any level beyond "output_level()".
+  bool KeyNotExistsBeyondOutputLevel(const Slice& user_key);
 
   // Returns true iff we should stop building the current output
   // before processing "internal_key".
@@ -77,6 +99,9 @@ class Compaction {
   // Delete this compaction from the list of running compactions.
   void ReleaseCompactionFiles(Status status);
 
+  // Returns the summary of the compaction in "output" with maximum "len"
+  // in bytes.  The caller is responsible for the memory management of
+  // "output".
   void Summary(char* output, int len);
 
   // Return the score that was used to pick this compaction run.
@@ -91,9 +116,9 @@ class Compaction {
   // Was this compaction triggered manually by the client?
   bool IsManualCompaction() { return is_manual_compaction_; }
 
-  // Returns a number of byte that the output file should be preallocated to
+  // Returns the size in bytes that the output file should be preallocated to.
   // In level compaction, that is max_file_size_. In universal compaction, that
-  // is the sum of all input file sizes
+  // is the sum of all input file sizes.
   uint64_t OutputFilePreallocationSize();
 
  private:
@@ -102,13 +127,14 @@ class Compaction {
   friend class FIFOCompactionPicker;
   friend class LevelCompactionPicker;
 
-  Compaction(Version* input_version, int level, int out_level,
+  Compaction(Version* input_version, int base_level, int out_level,
              uint64_t target_file_size, uint64_t max_grandparent_overlap_bytes,
              bool seek_compaction = false, bool enable_compression = true,
              bool deletion_compaction = false);
 
-  int level_;
-  int out_level_; // levels to which output files are stored
+  const int base_level_;    // the lowest level to be compacted
+  const int output_level_;  // levels to which output files are stored
+  const int input_levels_;  // output_level_ - base_level_
   uint64_t max_output_file_size_;
   uint64_t max_grandparent_overlap_bytes_;
   Version* input_version_;
@@ -116,22 +142,25 @@ class Compaction {
   int number_levels_;
   ColumnFamilyData* cfd_;
 
+  // If true, then seek compaction is enabled.
   bool seek_compaction_;
+  // If true, then compression is enabled.
   bool enable_compression_;
-  // if true, just delete files in inputs_[0]
+  // If true, then the comaction can be done by simply deleting input files.
   bool deletion_compaction_;
 
-  // Each compaction reads inputs from "level_" and "level_+1"
-  std::vector<FileMetaData*> inputs_[2];      // The two sets of inputs
+  // Each compaction reads inputs from "base_level_" and "base_level_+1"
+  std::vector<std::vector<FileMetaData*>> inputs_;
 
   // State used to check for number of of overlapping grandparent files
-  // (parent == level_ + 1, grandparent == level_ + 2)
+  // (parent == "output_level_", grandparent == "output_level_ + 1")
+  // This vector is updated by Version::GetOverlappingInputs().
   std::vector<FileMetaData*> grandparents_;
   size_t grandparent_index_;  // Index in grandparent_starts_
   bool seen_key_;             // Some output key has been seen
   uint64_t overlapped_bytes_;  // Bytes of overlap between current output
                               // and grandparent files
-  int base_index_;   // index of the file in files_[level_]
+  int base_index_;   // index of the file in files_[base_level_]
   int parent_index_; // index of some file with same range in files_[level_+1]
   double score_;     // score that was used to pick this compaction.
 
@@ -143,17 +172,21 @@ class Compaction {
   // Is this compaction requested by the client?
   bool is_manual_compaction_;
 
-  // level_ptrs_ holds indices into input_version_->levels_: our state
-  // is that we are positioned at one of the file ranges for each
-  // higher level than the ones involved in this compaction (i.e. for
-  // all L >= level_ + 2).
+  // "level_ptrs_" holds indices into "input_version_->levels_", where each
+  // index remembers which file of an associated level we are currently used
+  // to check KeyNotExistsBeyondOutputLevel() for deletion operation.
+  // As it is for checking KeyNotExistsBeyondOutputLevel(), it only
+  // records indices for all levels beyond "output_level_".
   std::vector<size_t> level_ptrs_;
 
   // mark (or clear) all files that are being compacted
-  void MarkFilesBeingCompacted(bool);
+  void MarkFilesBeingCompacted(bool mark_as_compacted);
 
-  // Initialize whether compaction producing files at the bottommost level
-  void SetupBottomMostLevel(bool isManual);
+  // Initialize whether the compaction is producing files at the
+  // bottommost level.
+  //
+  // @see BottomMostLevel()
+  void SetupBottomMostLevel(bool is_manual);
 
   // In case of compaction error, reset the nextIndex that is used
   // to pick up the next file to be compacted from files_by_size_

@@ -2170,11 +2170,11 @@ Status DBImpl::BackgroundCompaction(bool* madeProgress,
     // TODO(icanadi) Do we want to honor snapshots here? i.e. not delete old
     // file if there is alive snapshot pointing to it
     assert(c->num_input_files(1) == 0);
-    assert(c->level() == 0);
+    assert(c->base_level() == 0);
     assert(c->column_family_data()->options()->compaction_style ==
            kCompactionStyleFIFO);
     for (const auto& f : *c->inputs(0)) {
-      c->edit()->DeleteFile(c->level(), f->fd.GetNumber());
+      c->edit()->DeleteFile(c->base_level(), f->fd.GetNumber());
     }
     status = versions_->LogAndApply(c->column_family_data(), c->edit(), &mutex_,
                                     db_directory_.get());
@@ -2188,20 +2188,19 @@ Status DBImpl::BackgroundCompaction(bool* madeProgress,
     // Move file to next level
     assert(c->num_input_files(0) == 1);
     FileMetaData* f = c->input(0, 0);
-    c->edit()->DeleteFile(c->level(), f->fd.GetNumber());
-    c->edit()->AddFile(c->level() + 1, f->fd.GetNumber(), f->fd.GetFileSize(),
-                       f->smallest, f->largest, f->smallest_seqno,
-                       f->largest_seqno);
+    c->edit()->DeleteFile(c->base_level(), f->fd.GetNumber());
+    c->edit()->AddFile(c->output_level(), f->fd.GetNumber(),
+                       f->fd.GetFileSize(), f->smallest, f->largest,
+                       f->smallest_seqno, f->largest_seqno);
     status = versions_->LogAndApply(c->column_family_data(), c->edit(), &mutex_,
                                     db_directory_.get());
     InstallSuperVersion(c->column_family_data(), deletion_state);
 
     Version::LevelSummaryStorage tmp;
-    LogToBuffer(
-        log_buffer, "[%s] Moved #%lld to level-%d %lld bytes %s: %s\n",
+    LogToBuffer(log_buffer,
+        "[%s] Moved #%" PRIu64 " to level-%d %" PRIu64 " bytes %s: %s\n",
         c->column_family_data()->GetName().c_str(),
-        static_cast<unsigned long long>(f->fd.GetNumber()), c->level() + 1,
-        static_cast<unsigned long long>(f->fd.GetFileSize()),
+        f->fd.GetNumber(), c->base_level() + 1, f->fd.GetFileSize(),
         status.ToString().c_str(), c->input_version()->LevelSummary(&tmp));
     c->ReleaseCompactionFiles(status);
     *madeProgress = true;
@@ -2288,14 +2287,15 @@ void DBImpl::CleanupCompaction(CompactionState* compact, Status status) {
 }
 
 // Allocate the file numbers for the output file. We allocate as
-// many output file numbers as there are files in level+1 (at least one)
+// many output file numbers as there are files in output_level (at least one)
 // Insert them into pending_outputs so that they do not get deleted.
 void DBImpl::AllocateCompactionOutputFileNumbers(CompactionState* compact) {
   mutex_.AssertHeld();
   assert(compact != nullptr);
   assert(compact->builder == nullptr);
-  int filesNeeded = compact->compaction->num_input_files(1);
-  for (int i = 0; i < std::max(filesNeeded, 1); i++) {
+  int output_level = compact->compaction->output_level();
+  int filesNeeded = compact->compaction->num_input_files(output_level);
+  for (int i = 0; i < std::max(filesNeeded, output_level); i++) {
     uint64_t file_number = versions_->NewFileNumber();
     pending_outputs_.insert(file_number);
     compact->allocated_file_numbers.push_back(file_number);
@@ -2415,6 +2415,8 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact,
                                         LogBuffer* log_buffer) {
   mutex_.AssertHeld();
 
+  int base_level = compact->compaction->base_level();
+  int output_level = compact->compaction->output_level();
   // paranoia: verify that the files that we started with
   // still exist in the current version and in the same original level.
   // This ensures that a concurrent compaction did not erroneously
@@ -2422,18 +2424,15 @@ Status DBImpl::InstallCompactionResults(CompactionState* compact,
   if (!versions_->VerifyCompactionFileConsistency(compact->compaction)) {
     Log(options_.info_log, "[%s] Compaction %d@%d + %d@%d files aborted",
         compact->compaction->column_family_data()->GetName().c_str(),
-        compact->compaction->num_input_files(0), compact->compaction->level(),
-        compact->compaction->num_input_files(1),
-        compact->compaction->output_level());
+        compact->compaction->num_input_files(base_level), base_level,
+        compact->compaction->num_input_files(output_level), output_level);
     return Status::Corruption("Compaction input files inconsistent");
   }
 
   LogToBuffer(log_buffer, "[%s] Compacted %d@%d + %d@%d files => %lld bytes",
               compact->compaction->column_family_data()->GetName().c_str(),
-              compact->compaction->num_input_files(0),
-              compact->compaction->level(),
-              compact->compaction->num_input_files(1),
-              compact->compaction->output_level(),
+              compact->compaction->num_input_files(base_level), base_level,
+              compact->compaction->num_input_files(output_level), output_level,
               static_cast<long long>(compact->total_bytes));
 
   // Add compaction outputs
@@ -2602,7 +2601,7 @@ Status DBImpl::ProcessKeyValueCompaction(
           bool value_changed = false;
           compaction_filter_value.clear();
           bool to_delete = compaction_filter->Filter(
-              compact->compaction->level(), ikey.user_key, value,
+              compact->compaction->base_level(), ikey.user_key, value,
               &compaction_filter_value, &value_changed);
           if (to_delete) {
             // make a copy of the original key and convert it to a delete
@@ -2641,7 +2640,7 @@ Status DBImpl::ProcessKeyValueCompaction(
         RecordTick(options_.statistics.get(), COMPACTION_KEY_DROP_NEWER_ENTRY);
       } else if (ikey.type == kTypeDeletion &&
           ikey.sequence <= earliest_snapshot &&
-          compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
+          compact->compaction->KeyNotExistsBeyondOutputLevel(ikey.user_key)) {
         // For this user key:
         // (1) there is no data in higher levels
         // (2) data in lower levels will have larger sequence numbers
@@ -2812,7 +2811,7 @@ void DBImpl::CallCompactionFilterV2(CompactionState* compact,
   // If the return value of the compaction filter is true, replace
   // the entry with a delete marker.
   compact->to_delete_buf_ = compaction_filter_v2->Filter(
-      compact->compaction->level(),
+      compact->compaction->base_level(),
       user_key_buf, compact->existing_value_buf_,
       &compact->new_value_buf_,
       &compact->value_changed_buf_);
@@ -2853,22 +2852,25 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
   compact->CleanupBatchBuffer();
   compact->CleanupMergedBuffer();
   bool prefix_initialized = false;
+  int base_level = compact->compaction->base_level();
+  int output_level = compact->compaction->output_level();
 
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
   ColumnFamilyData* cfd = compact->compaction->column_family_data();
   LogToBuffer(
       log_buffer,
       "[%s] Compacting %d@%d + %d@%d files, score %.2f slots available %d",
-      cfd->GetName().c_str(), compact->compaction->num_input_files(0),
-      compact->compaction->level(), compact->compaction->num_input_files(1),
-      compact->compaction->output_level(), compact->compaction->score(),
+      cfd->GetName().c_str(),
+      compact->compaction->num_input_files(base_level), base_level,
+      compact->compaction->num_input_files(output_level), output_level,
+      compact->compaction->score(),
       options_.max_background_compactions - bg_compaction_scheduled_);
   char scratch[2345];
   compact->compaction->Summary(scratch, sizeof(scratch));
   LogToBuffer(log_buffer, "[%s] Compaction start summary: %s\n",
               cfd->GetName().c_str(), scratch);
 
-  assert(cfd->current()->NumLevelFiles(compact->compaction->level()) > 0);
+  assert(cfd->current()->NumLevelFiles(base_level) > 0);
   assert(compact->builder == nullptr);
   assert(!compact->outfile);
 
@@ -3086,8 +3088,9 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
   InternalStats::CompactionStats stats;
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
   MeasureTime(options_.statistics.get(), COMPACTION_TIME, stats.micros);
-  stats.files_in_leveln = compact->compaction->num_input_files(0);
-  stats.files_in_levelnp1 = compact->compaction->num_input_files(1);
+  // TODO(yhchiang): may need to change this for across-level compaction
+  stats.files_in_leveln = compact->compaction->num_input_files(base_level);
+  stats.files_in_levelnp1 = compact->compaction->num_input_files(output_level);
 
   int num_output_files = compact->outputs.size();
   if (compact->builder != nullptr) {
@@ -3097,16 +3100,24 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
   }
   stats.files_out_levelnp1 = num_output_files;
 
-  for (int i = 0; i < compact->compaction->num_input_files(0); i++) {
-    stats.bytes_readn += compact->compaction->input(0, i)->fd.GetFileSize();
+  // TODO(yhchiang): may need to change this for across-level compaction
+  //     using a for-loop between base_level and output_level
+  for (int i = 0;
+       i < compact->compaction->num_input_files(base_level);
+       i++) {
+    stats.bytes_readn +=
+        compact->compaction->input(base_level, i)->fd.GetFileSize();
     RecordTick(options_.statistics.get(), COMPACT_READ_BYTES,
-               compact->compaction->input(0, i)->fd.GetFileSize());
+               compact->compaction->input(base_level, i)->fd.GetFileSize());
   }
 
-  for (int i = 0; i < compact->compaction->num_input_files(1); i++) {
-    stats.bytes_readnp1 += compact->compaction->input(1, i)->fd.GetFileSize();
+  for (int i = 0;
+       i < compact->compaction->num_input_files(output_level);
+       i++) {
+    stats.bytes_readnp1 +=
+        compact->compaction->input(output_level, i)->fd.GetFileSize();
     RecordTick(options_.statistics.get(), COMPACT_READ_BYTES,
-               compact->compaction->input(1, i)->fd.GetFileSize());
+               compact->compaction->input(output_level, i)->fd.GetFileSize());
   }
 
   for (int i = 0; i < num_output_files; i++) {
@@ -3117,8 +3128,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
 
   LogFlush(options_.info_log);
   mutex_.Lock();
-  cfd->internal_stats()->AddCompactionStats(compact->compaction->output_level(),
-                                            stats);
+  cfd->internal_stats()->AddCompactionStats(output_level, stats);
 
   // if there were any unused file number (mostly in case of
   // compaction error), free up the entry from pending_putputs
@@ -3137,7 +3147,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
       cfd->GetName().c_str(), cfd->current()->LevelSummary(&tmp),
       (stats.bytes_readn + stats.bytes_readnp1 + stats.bytes_written) /
           (double)stats.micros,
-      compact->compaction->output_level(), stats.files_in_leveln,
+      output_level, stats.files_in_leveln,
       stats.files_in_levelnp1, stats.files_out_levelnp1,
       stats.bytes_readn / 1048576.0, stats.bytes_readnp1 / 1048576.0,
       stats.bytes_written / 1048576.0,

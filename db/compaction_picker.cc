@@ -78,9 +78,11 @@ void CompactionPicker::SizeBeingCompacted(std::vector<uint64_t>& sizes) {
   for (int level = 0; level < NumberLevels() - 1; level++) {
     uint64_t total = 0;
     for (auto c : compactions_in_progress_[level]) {
-      assert(c->level() == level);
-      for (int i = 0; i < c->num_input_files(0); i++) {
-        total += c->input(0, i)->fd.GetFileSize();
+      assert(c->base_level() == level);
+      for (int input_lv = 0; input_lv < c->input_levels(); ++input_lv) {
+        for (int i = 0; i < c->num_input_files(input_lv); i++) {
+          total += c->input(input_lv, i)->fd.GetFileSize();
+        }
       }
     }
     sizes[level] = total;
@@ -91,7 +93,7 @@ void CompactionPicker::SizeBeingCompacted(std::vector<uint64_t>& sizes) {
 // Delete this compaction from the list of running compactions.
 void CompactionPicker::ReleaseCompactionFiles(Compaction* c, Status status) {
   c->MarkFilesBeingCompacted(false);
-  compactions_in_progress_[c->level()].erase(c);
+  compactions_in_progress_[c->base_level()].erase(c);
   if (!status.ok()) {
     c->ResetNextCompactionIndex();
   }
@@ -146,6 +148,7 @@ void CompactionPicker::GetRange(const std::vector<FileMetaData*>& inputs1,
   GetRange(all, smallest, largest);
 }
 
+// TODO(yhchiang): take all input levels instead of inputs_[0]
 bool CompactionPicker::ExpandWhileOverlapping(Compaction* c) {
   // If inputs are empty then there is nothing to expand.
   if (!c || c->inputs_[0].empty()) {
@@ -154,11 +157,11 @@ bool CompactionPicker::ExpandWhileOverlapping(Compaction* c) {
 
   // GetOverlappingInputs will always do the right thing for level-0.
   // So we don't need to do any expansion if level == 0.
-  if (c->level() == 0) {
+  if (c->base_level() == 0) {
     return true;
   }
 
-  const int level = c->level();
+  const int level = c->base_level();
   InternalKey smallest, largest;
 
   // Keep expanding c->inputs_[0] until we are sure that there is a
@@ -186,7 +189,7 @@ bool CompactionPicker::ExpandWhileOverlapping(Compaction* c) {
         c->column_family_data()->GetName().c_str());
   }
   if (c->inputs_[0].empty() || FilesInCompaction(c->inputs_[0]) ||
-      (c->level() != c->output_level() &&
+      (c->base_level() != c->output_level() &&
        ParentRangeInCompaction(c->input_version_, &smallest, &largest, level,
                                &parent_index))) {
     c->inputs_[0].clear();
@@ -233,11 +236,11 @@ void CompactionPicker::SetupOtherInputs(Compaction* c) {
   // If inputs are empty, then there is nothing to expand.
   // If both input and output levels are the same, no need to consider
   // files at level "level+1"
-  if (c->inputs_[0].empty() || c->level() == c->output_level()) {
+  if (c->inputs_[0].empty() || c->base_level() == c->output_level()) {
     return;
   }
 
-  const int level = c->level();
+  const int level = c->base_level();
   InternalKey smallest, largest;
 
   // Get the range one last time.
@@ -377,6 +380,7 @@ Compaction* CompactionPicker::CompactRange(Version* version, int input_level,
   return c;
 }
 
+// TODO(yhchiang): update this function to make it pick files across levels.
 Compaction* LevelCompactionPicker::PickCompaction(Version* version,
                                                   LogBuffer* log_buffer) {
   Compaction* c = nullptr;
@@ -451,6 +455,7 @@ Compaction* LevelCompactionPicker::PickCompaction(Version* version,
   return c;
 }
 
+// TODO(yhchiang): update it to allow picking files from multiple levels
 Compaction* LevelCompactionPicker::PickCompactionBySize(Version* version,
                                                         int level,
                                                         double score) {
@@ -464,6 +469,7 @@ Compaction* LevelCompactionPicker::PickCompactionBySize(Version* version,
     return nullptr;
   }
 
+  // TODO(yhchiang): update the following to take multiple levels
   assert(level >= 0);
   assert(level + 1 < NumberLevels());
   c = new Compaction(version, level, level + 1, MaxFileSizeForLevel(level + 1),

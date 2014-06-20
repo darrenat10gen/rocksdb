@@ -937,6 +937,7 @@ int Version::PickLevelForMemTableOutput(
 // If hint_index is specified, then it points to a file in the
 // overlapping range.
 // The file_index returns a pointer to any file in an overlapping range.
+// TODO(yhchiang): make inputs takes 2D array of inputs instead of 1D.
 void Version::GetOverlappingInputs(int level,
                                    const InternalKey* begin,
                                    const InternalKey* end,
@@ -2620,12 +2621,13 @@ Iterator* VersionSet::MakeInputIterator(Compaction* c) {
   // Level-0 files have to be merged together.  For other levels,
   // we will make a concatenating iterator per level.
   // TODO(opt): use concatenating iterator for level-0 if there is no overlap
-  const int space = (c->level() == 0 ? c->inputs(0)->size() + 1 : 2);
+  const int space = (c->base_level() == 0 ?
+      c->inputs(0)->size() + c->input_levels() - 1 : c->input_levels());
   Iterator** list = new Iterator*[space];
   int num = 0;
-  for (int which = 0; which < 2; which++) {
+  for (int which = 0; which < c->input_levels(); which++) {
     if (!c->inputs(which)->empty()) {
-      if (c->level() + which == 0) {
+      if (c->base_level() + which == 0) {
         for (const auto& file : *c->inputs(which)) {
           list[num++] = cfd->table_cache()->NewIterator(
               read_options, storage_options_compactions_,
@@ -2661,44 +2663,27 @@ bool VersionSet::VerifyCompactionFileConsistency(Compaction* c) {
         c->column_family_data()->GetName().c_str());
   }
 
-  // verify files in level
-  int level = c->level();
-  for (int i = 0; i < c->num_input_files(0); i++) {
-    uint64_t number = c->input(0, i)->fd.GetNumber();
+  for (int input_level = 0; input_level < c->input_levels(); ++input_level) {
+    int level = c->base_level() + input_level;
+    for (int i = 0; i < c->num_input_files(input_level); i++) {
+      uint64_t number = c->input(input_level, i)->fd.GetNumber();
 
-    // look for this file in the current version
-    bool found = false;
-    for (unsigned int j = 0; j < version->files_[level].size(); j++) {
-      FileMetaData* f = version->files_[level][j];
-      if (f->fd.GetNumber() == number) {
-        found = true;
-        break;
+      // look for this file in the current version
+      bool found = false;
+      for (unsigned int j = 0; j < version->files_[level].size(); j++) {
+        FileMetaData* f = version->files_[level][j];
+        if (f->fd.GetNumber() == number) {
+          found = true;
+          break;
+        }
       }
-    }
-    if (!found) {
-      return false; // input files non existant in current version
-    }
-  }
-  // verify level+1 files
-  level++;
-  for (int i = 0; i < c->num_input_files(1); i++) {
-    uint64_t number = c->input(1, i)->fd.GetNumber();
-
-    // look for this file in the current version
-    bool found = false;
-    for (unsigned int j = 0; j < version->files_[level].size(); j++) {
-      FileMetaData* f = version->files_[level][j];
-      if (f->fd.GetNumber() == number) {
-        found = true;
-        break;
+      if (!found) {
+        return false;  // an input file does not exist in current version
       }
-    }
-    if (!found) {
-      return false; // input files non existant in current version
     }
   }
 #endif
-  return true;     // everything good
+  return true;  // everything good
 }
 
 Status VersionSet::GetMetadataForFile(uint64_t number, int* filelevel,
