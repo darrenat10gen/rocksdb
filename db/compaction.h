@@ -68,8 +68,11 @@ class Compaction {
   // Maximum size of files to build during this compaction.
   uint64_t MaxOutputFileSize() const { return max_output_file_size_; }
 
-  // Whether compression will be enabled for compaction outputs
-  bool enable_compression() const { return enable_compression_; }
+  // What compression for output
+  CompressionType OutputCompressionType() const { return output_compression_; }
+
+  // Whether need to write output file to second DB path.
+  uint32_t GetOutputPathId() const { return output_path_id_; }
 
   // Is this a trivial compaction that can be implemented by just
   // moving a single input file to the next level (no merging or splitting)
@@ -129,8 +132,8 @@ class Compaction {
 
   Compaction(Version* input_version, int base_level, int out_level,
              uint64_t target_file_size, uint64_t max_grandparent_overlap_bytes,
-             bool seek_compaction = false, bool enable_compression = true,
-             bool deletion_compaction = false);
+             uint32_t output_path_id, CompressionType output_compression,
+             bool seek_compaction = false, bool deletion_compaction = false);
 
   const int base_level_;    // the lowest level to be compacted
   const int output_level_;  // levels to which output files are stored
@@ -142,10 +145,9 @@ class Compaction {
   int number_levels_;
   ColumnFamilyData* cfd_;
 
-  // If true, then seek compaction is enabled.
+  uint32_t output_path_id_;
+  CompressionType output_compression_;
   bool seek_compaction_;
-  // If true, then compression is enabled.
-  bool enable_compression_;
   // If true, then the comaction can be done by simply deleting input files.
   bool deletion_compaction_;
 
