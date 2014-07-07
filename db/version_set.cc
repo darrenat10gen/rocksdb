@@ -1473,7 +1473,7 @@ class VersionSet::Builder {
         }
       }
       if (!found) {
-        fprintf(stderr, "not found %ld\n", number);
+        fprintf(stderr, "not found %" PRIu64 "\n", number);
       }
       assert(found);
 #endif
