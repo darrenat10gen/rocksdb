@@ -1406,7 +1406,7 @@ Status DBImpl::WriteLevel0TableForRecovery(ColumnFamilyData* cfd, MemTable* mem,
     s = BuildTable(dbname_, env_, *cfd->options(), storage_options_,
                    cfd->table_cache(), iter, &meta, cfd->internal_comparator(),
                    newest_snapshot, earliest_seqno_in_memtable,
-                   GetCompressionFlush(*cfd->options()));
+                   GetCompressionFlush(*cfd->options()), Env::IO_HIGH);
     LogFlush(options_.info_log);
     mutex_.Lock();
   }
@@ -1428,7 +1428,7 @@ Status DBImpl::WriteLevel0TableForRecovery(ColumnFamilyData* cfd, MemTable* mem,
                   meta.smallest_seqno, meta.largest_seqno);
   }
 
-  InternalStats::CompactionStats stats;
+  InternalStats::CompactionStats stats(1);
   stats.micros = env_->NowMicros() - start_micros;
   stats.bytes_written = meta.fd.GetFileSize();
   stats.files_out_levelnp1 = 1;
@@ -1473,7 +1473,7 @@ Status DBImpl::WriteLevel0Table(ColumnFamilyData* cfd,
     s = BuildTable(dbname_, env_, *cfd->options(), storage_options_,
                    cfd->table_cache(), iter, &meta, cfd->internal_comparator(),
                    newest_snapshot, earliest_seqno_in_memtable,
-                   GetCompressionFlush(*cfd->options()));
+                   GetCompressionFlush(*cfd->options()), Env::IO_HIGH);
     LogFlush(options_.info_log);
     delete iter;
     Log(options_.info_log,
@@ -1519,7 +1519,7 @@ Status DBImpl::WriteLevel0Table(ColumnFamilyData* cfd,
                   meta.smallest_seqno, meta.largest_seqno);
   }
 
-  InternalStats::CompactionStats stats;
+  InternalStats::CompactionStats stats(1);
   stats.micros = env_->NowMicros() - start_micros;
   stats.bytes_written = meta.fd.GetFileSize();
   cfd->internal_stats()->AddCompactionStats(level, stats);
@@ -2385,6 +2385,7 @@ Status DBImpl::OpenCompactionOutputFile(CompactionState* compact) {
   Status s = env_->NewWritableFile(fname, &compact->outfile, storage_options_);
 
   if (s.ok()) {
+    compact->outfile->SetIOPriority(Env::IO_LOW);
     compact->outfile->SetPreallocationBlockSize(
         compact->compaction->OutputFilePreallocationSize());
 
@@ -2903,6 +2904,8 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
   int base_level = compact->compaction->base_level();
   int output_level = compact->compaction->output_level();
 
+  // Generate file_levels_ for compaction berfore making Iterator
+  compact->compaction->GenerateFileLevels();
   int64_t imm_micros = 0;  // Micros spent doing imm_ compactions
   ColumnFamilyData* cfd = compact->compaction->column_family_data();
   LogToBuffer(
@@ -3133,7 +3136,7 @@ Status DBImpl::DoCompactionWork(CompactionState* compact,
     db_directory_->Fsync();
   }
 
-  InternalStats::CompactionStats stats;
+  InternalStats::CompactionStats stats(1);
   stats.micros = env_->NowMicros() - start_micros - imm_micros;
   MeasureTime(options_.statistics.get(), COMPACTION_TIME, stats.micros);
   // TODO(yhchiang): may need to change this for across-level compaction

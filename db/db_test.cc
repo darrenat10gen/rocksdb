@@ -27,6 +27,7 @@
 #include "rocksdb/slice.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/table.h"
+#include "rocksdb/options.h"
 #include "rocksdb/table_properties.h"
 #include "table/block_based_table_factory.h"
 #include "table/plain_table_factory.h"
@@ -35,6 +36,7 @@
 #include "utilities/merge_operators.h"
 #include "util/logging.h"
 #include "util/mutexlock.h"
+#include "util/rate_limiter.h"
 #include "util/statistics.h"
 #include "util/testharness.h"
 #include "util/sync_point.h"
@@ -135,6 +137,8 @@ class SpecialEnv : public EnvWrapper {
 
   anon::AtomicCounter sleep_counter_;
 
+  std::atomic<int64_t> bytes_written_;
+
   explicit SpecialEnv(Env* base) : EnvWrapper(base) {
     delay_sstable_sync_.Release_Store(nullptr);
     no_space_.Release_Store(nullptr);
@@ -144,7 +148,8 @@ class SpecialEnv : public EnvWrapper {
     manifest_sync_error_.Release_Store(nullptr);
     manifest_write_error_.Release_Store(nullptr);
     log_write_error_.Release_Store(nullptr);
-   }
+    bytes_written_ = 0;
+  }
 
   Status NewWritableFile(const std::string& f, unique_ptr<WritableFile>* r,
                          const EnvOptions& soptions) {
@@ -163,6 +168,7 @@ class SpecialEnv : public EnvWrapper {
           // Drop writes on the floor
           return Status::OK();
         } else {
+          env_->bytes_written_ += data.size();
           return base_->Append(data);
         }
       }
@@ -173,6 +179,9 @@ class SpecialEnv : public EnvWrapper {
           env_->SleepForMicroseconds(100000);
         }
         return base_->Sync();
+      }
+      void SetIOPriority(Env::IOPriority pri) {
+        base_->SetIOPriority(pri);
       }
     };
     class ManifestFile : public WritableFile {
@@ -2346,6 +2355,7 @@ TEST(DBTest, NumImmutableMemTable) {
     std::string big_value(1000000 * 2, 'x');
     std::string num;
     SetPerfLevel(kEnableTime);;
+    ASSERT_TRUE(GetPerfLevel() == kEnableTime);
 
     ASSERT_OK(dbfull()->Put(writeOpt, handles_[1], "k1", big_value));
     ASSERT_TRUE(dbfull()->GetProperty(handles_[1],
@@ -2408,6 +2418,7 @@ TEST(DBTest, NumImmutableMemTable) {
     // break if we change the default skiplist implementation
     ASSERT_EQ(num, "200");
     SetPerfLevel(kDisable);
+    ASSERT_TRUE(GetPerfLevel() == kDisable);
   } while (ChangeCompactOptions());
 }
 
@@ -6906,6 +6917,63 @@ TEST(DBTest, TailingIteratorPrefixSeek) {
   ASSERT_TRUE(!iter->Valid());
 }
 
+TEST(DBTest, TailingIteratorIncomplete) {
+  CreateAndReopenWithCF({"pikachu"});
+  ReadOptions read_options;
+  read_options.tailing = true;
+  read_options.read_tier = kBlockCacheTier;
+
+  std::string key("key");
+  std::string value("value");
+
+  ASSERT_OK(db_->Put(WriteOptions(), key, value));
+
+  std::unique_ptr<Iterator> iter(db_->NewIterator(read_options));
+  iter->SeekToFirst();
+  // we either see the entry or it's not in cache
+  ASSERT_TRUE(iter->Valid() || iter->status().IsIncomplete());
+
+  ASSERT_OK(db_->CompactRange(nullptr, nullptr));
+  iter->SeekToFirst();
+  // should still be true after compaction
+  ASSERT_TRUE(iter->Valid() || iter->status().IsIncomplete());
+}
+
+TEST(DBTest, TailingIteratorSeekToSame) {
+  Options options = CurrentOptions();
+  options.compaction_style = kCompactionStyleUniversal;
+  options.write_buffer_size = 1000;
+  CreateAndReopenWithCF({"pikachu"}, &options);
+
+  ReadOptions read_options;
+  read_options.tailing = true;
+
+  const int NROWS = 10000;
+  // Write rows with keys 00000, 00002, 00004 etc.
+  for (int i = 0; i < NROWS; ++i) {
+    char buf[100];
+    snprintf(buf, sizeof(buf), "%05d", 2*i);
+    std::string key(buf);
+    std::string value("value");
+    ASSERT_OK(db_->Put(WriteOptions(), key, value));
+  }
+
+  std::unique_ptr<Iterator> iter(db_->NewIterator(read_options));
+  // Seek to 00001.  We expect to find 00002.
+  std::string start_key = "00001";
+  iter->Seek(start_key);
+  ASSERT_TRUE(iter->Valid());
+
+  std::string found = iter->key().ToString();
+  ASSERT_EQ("00002", found);
+
+  // Now seek to the same key.  The iterator should remain in the same
+  // position.
+  iter->Seek(found);
+  ASSERT_TRUE(iter->Valid());
+  ASSERT_EQ(found, iter->key().ToString());
+}
+
 TEST(DBTest, BlockBasedTablePrefixIndexTest) {
   // create a DB with block prefix index
   BlockBasedTableOptions table_options;
@@ -7123,6 +7191,79 @@ TEST(DBTest, MTRandomTimeoutTest) {
 }
 
 }  // anonymous namespace
+
+/*
+ * This test is not reliable enough as it heavily depends on disk behavior.
+ *
+TEST(DBTest, RateLimitingTest) {
+  Options options = CurrentOptions();
+  options.write_buffer_size = 1 << 20;         // 1MB
+  options.level0_file_num_compaction_trigger = 2;
+  options.target_file_size_base = 1 << 20;     // 1MB
+  options.max_bytes_for_level_base = 4 << 20;  // 4MB
+  options.max_bytes_for_level_multiplier = 4;
+  options.compression = kNoCompression;
+  options.create_if_missing = true;
+  options.env = env_;
+  options.IncreaseParallelism(4);
+  DestroyAndReopen(&options);
+
+  WriteOptions wo;
+  wo.disableWAL = true;
+
+  // # no rate limiting
+  Random rnd(301);
+  uint64_t start = env_->NowMicros();
+  // Write ~96M data
+  for (int64_t i = 0; i < (96 << 10); ++i) {
+    ASSERT_OK(Put(RandomString(&rnd, 32),
+                  RandomString(&rnd, (1 << 10) + 1), wo));
+  }
+  uint64_t elapsed = env_->NowMicros() - start;
+  double raw_rate = env_->bytes_written_ * 1000000 / elapsed;
+  Close();
+
+  // # rate limiting with 0.7 x threshold
+  options.rate_limiter.reset(
+      NewRateLimiter(static_cast<int64_t>(0.7 * raw_rate)));
+  env_->bytes_written_ = 0;
+  DestroyAndReopen(&options);
+
+  start = env_->NowMicros();
+  // Write ~96M data
+  for (int64_t i = 0; i < (96 << 10); ++i) {
+    ASSERT_OK(Put(RandomString(&rnd, 32),
+                  RandomString(&rnd, (1 << 10) + 1), wo));
+  }
+  elapsed = env_->NowMicros() - start;
+  Close();
+  ASSERT_TRUE(options.rate_limiter->GetTotalBytesThrough() ==
+              env_->bytes_written_);
+  double ratio = env_->bytes_written_ * 1000000 / elapsed / raw_rate;
+  fprintf(stderr, "write rate ratio = %.2lf, expected 0.7\n", ratio);
+  ASSERT_TRUE(ratio > 0.6 && ratio < 0.8);
+
+  // # rate limiting with half of the raw_rate
+  options.rate_limiter.reset(
+      NewRateLimiter(static_cast<int64_t>(raw_rate / 2)));
+  env_->bytes_written_ = 0;
+  DestroyAndReopen(&options);
+
+  start = env_->NowMicros();
+  // Write ~96M data
+  for (int64_t i = 0; i < (96 << 10); ++i) {
+    ASSERT_OK(Put(RandomString(&rnd, 32),
+                  RandomString(&rnd, (1 << 10) + 1), wo));
+  }
+  elapsed = env_->NowMicros() - start;
+  Close();
+  ASSERT_TRUE(options.rate_limiter->GetTotalBytesThrough() ==
+              env_->bytes_written_);
+  ratio = env_->bytes_written_ * 1000000 / elapsed / raw_rate;
+  fprintf(stderr, "write rate ratio = %.2lf, expected 0.5\n", ratio);
+  ASSERT_TRUE(ratio > 0.4 && ratio < 0.6);
+}
+*/
 
 }  // namespace rocksdb
 
