@@ -34,7 +34,7 @@ Compaction::Compaction(Version* input_version, int base_level, int out_level,
                        bool deletion_compaction)
     : base_level_(base_level),
       output_level_(out_level),
-      input_levels_(output_level_ - base_level_ + 1),
+      num_input_levels_(output_level_ - base_level_ + 1),
       max_output_file_size_(target_file_size),
       max_grandparent_overlap_bytes_(max_grandparent_overlap_bytes),
       input_version_(input_version),
@@ -91,14 +91,14 @@ bool Compaction::IsTrivialMove() const {
   // If base_level_== output_level_, the purpose is to force compaction
   // filter to be applied to that level, and thus cannot be a trivia move.
   return (base_level_ != output_level_ &&
-          input_levels_ == 2 &&
+          num_input_levels_ == 2 &&
           num_input_files(0) == 1 &&
           num_input_files(1) == 0 &&
           TotalFileSize(grandparents_) <= max_grandparent_overlap_bytes_);
 }
 
 void Compaction::AddInputDeletions(VersionEdit* edit) {
-  for (int which = 0; which < input_levels_; which++) {
+  for (int which = 0; which < num_input_levels_; which++) {
     for (size_t i = 0; i < inputs_[which].size(); i++) {
       edit->DeleteFile(base_level_ + which, inputs_[which][i]->fd.GetNumber());
     }
@@ -159,7 +159,7 @@ bool Compaction::ShouldStopBefore(const Slice& internal_key) {
 
 // Mark (or clear) each file that is being compacted
 void Compaction::MarkFilesBeingCompacted(bool mark_as_compacted) {
-  for (int i = 0; i < input_levels_; i++) {
+  for (int i = 0; i < num_input_levels_; i++) {
     std::vector<FileMetaData*> v = inputs_[i];
     for (unsigned int j = 0; j < inputs_[i].size(); j++) {
       assert(mark_as_compacted ? !inputs_[i][j]->being_compacted :
@@ -245,7 +245,7 @@ void Compaction::Summary(char* output, int len) {
     return;
   }
 
-  for (int level = 0; level < input_levels_; ++level) {
+  for (int level = 0; level < num_input_levels_; ++level) {
     if (level > 0) {
       write += snprintf(output + write, len - write, "], [");
       if (write < 0 || write >= len) {
@@ -268,7 +268,7 @@ uint64_t Compaction::OutputFilePreallocationSize() {
     preallocation_size =
         cfd_->compaction_picker()->MaxFileSizeForLevel(output_level());
   } else {
-    for (int level = 0; level < input_levels_; ++level) {
+    for (int level = 0; level < num_input_levels_; ++level) {
       for (const auto& f : inputs_[level]) {
         preallocation_size += f->fd.GetFileSize();
       }

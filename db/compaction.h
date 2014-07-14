@@ -35,7 +35,7 @@ class Compaction {
 
   // Returns the number of input levels in this compaction.
   // This number equals to "output_level() - base_level() + 1".
-  int input_levels() const { return input_levels_; }
+  int input_levels() const { return num_input_levels_; }
 
   // Return the object that holds the edits to the descriptor done
   // by this compaction.
@@ -44,7 +44,7 @@ class Compaction {
   // Returns the number of input files at level "base_level() + which".
   // The function will return 0 if when "which" < 0 or >= "input_levels()".
   int num_input_files(int which) const {
-    if (which >= 0 && which < input_levels_) {
+    if (which >= 0 && which < num_input_levels_) {
       return inputs_[which].size();
     }
     return 0;
@@ -59,7 +59,7 @@ class Compaction {
   // Returns the ith input file at level "base_level() + which",
   // and "which" must be >= 0 and < "input_levels()".
   FileMetaData* input(int which, int i) const {
-    assert(which < input_levels_ && which >= 0);
+    assert(which < num_input_levels_ && which >= 0);
     return inputs_[which][i];
   }
 
@@ -67,7 +67,7 @@ class Compaction {
   // "base_level() + which", where "which" must be >= 0 and
   // < "input_levels()"
   std::vector<FileMetaData*>* const inputs(int which) {
-    assert(which < input_levels_ && which >= 0);
+    assert(which < num_input_levels_ && which >= 0);
     return &inputs_[which];
   }
 
@@ -150,7 +150,7 @@ class Compaction {
 
   const int base_level_;    // the lowest level to be compacted
   const int output_level_;  // levels to which output files are stored
-  const int input_levels_;  // output_level_ - base_level_
+  const int num_input_levels_;  // output_level_ - base_level_
   uint64_t max_output_file_size_;
   uint64_t max_grandparent_overlap_bytes_;
   Version* input_version_;
