@@ -7,7 +7,7 @@
 // calling c++ rocksdb::Env methods from Java side.
 
 #include "include/org_rocksdb_RocksEnv.h"
-#include "rocks_hdfs/env_hdfs.h"
+#include "hdfs/env_hdfs.h"
 #include "rocksdb/env.h"
 
 /*
