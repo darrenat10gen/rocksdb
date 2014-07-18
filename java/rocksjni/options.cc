@@ -1647,6 +1647,17 @@ void Java_org_rocksdb_Options_setMinPartialMergeOperands(
           static_cast<int32_t>(jmin_partial_merge_operands);
 }
 
+/*
+ * Class:     org_rocksdb_Options
+ * Method:    setEnv
+ * Signature: (JJ)V
+ */
+void Java_org_rocksdb_Options_setEnv(
+    JNIEnv* env, jobject jobj, jlong jhandle, jlong jenvhandle) {
+  reinterpret_cast<rocksdb::Options*>(
+      jhandle)->env = reinterpret_cast<rocksdb::Env*>(jenvhandle);
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // WriteOptions
 

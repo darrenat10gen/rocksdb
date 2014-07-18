@@ -7,7 +7,21 @@
 // calling c++ rocksdb::Env methods from Java side.
 
 #include "include/org_rocksdb_RocksEnv.h"
+#include "rocks_hdfs/env_hdfs.h"
 #include "rocksdb/env.h"
+
+/*
+ * Class:     org_rocksdb_RocksEnv
+ * Method:    getHdfsEnvInternal
+ * Signature: (Ljava/lang/String;)J
+ */
+jlong Java_org_rocksdb_RocksEnv_getHdfsEnvInternal(
+    JNIEnv* env, jclass jclass, jstring path) {
+  const char* hdfs_path = env->GetStringUTFChars(path, 0);
+  jlong hdfsEnvHandle = reinterpret_cast<jlong>(new rocksdb::HdfsEnv(hdfs_path));
+  env->ReleaseStringUTFChars(path, hdfs_path);
+  return hdfsEnvHandle;
+}
 
 /*
  * Class:     org_rocksdb_RocksEnv

@@ -23,30 +23,74 @@
 /*
  * Class:     org_rocksdb_RocksDB
  * Method:    open
+ * Signature: (JLjava/lang/String;java/lang/String;)V
+ */
+jlong Java_org_rocksdb_RocksDB_openColumnFamilyRead(
+  JNIEnv* env, jobject jdb, jlong jopt_handle,
+  jlong jcache_size, jstring jdb_path, jstring jdb_fam) {
+    auto opt = reinterpret_cast<rocksdb::Options*>(jopt_handle);
+    if (jcache_size > 0) {
+        opt->no_block_cache = false;
+        opt->block_cache = rocksdb::NewLRUCache(jcache_size);
+    } else {
+        opt->no_block_cache = true;
+        opt->block_cache = nullptr;
+    }
+    
+    rocksdb::DB* db = nullptr;
+    const char* db_path = env->GetStringUTFChars(jdb_path, 0);
+    const char* family  = env->GetStringUTFChars(jdb_fam, 0);
+
+    // open DB with specified family (+default)
+    std::vector<rocksdb::ColumnFamilyDescriptor> column_families;
+    column_families.push_back(rocksdb::ColumnFamilyDescriptor(
+      rocksdb::kDefaultColumnFamilyName, rocksdb::ColumnFamilyOptions()));
+    // open the requested one, too
+    column_families.push_back(rocksdb::ColumnFamilyDescriptor(
+      family, rocksdb::ColumnFamilyOptions()));
+    std::vector<rocksdb::ColumnFamilyHandle*> handles;
+    rocksdb::Status s = rocksdb::DB::OpenForReadOnly(
+         *opt, db_path, column_families, &handles, &db);
+    assert(s.ok());
+    assert(handles[1] != nullptr);
+    env->ReleaseStringUTFChars(jdb_path, db_path);
+    env->ReleaseStringUTFChars(jdb_fam, family);
+    
+    if (s.ok()) {
+        rocksdb::RocksDBJni::setHandle(env, jdb, db);
+        return reinterpret_cast<jlong>(handles[1]);
+    }
+    rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+    return 0;
+}
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    open
  * Signature: (JLjava/lang/String;)V
  */
 void Java_org_rocksdb_RocksDB_open(
-    JNIEnv* env, jobject jdb, jlong jopt_handle,
-    jlong jcache_size, jstring jdb_path) {
-  auto opt = reinterpret_cast<rocksdb::Options*>(jopt_handle);
-  if (jcache_size > 0) {
-    opt->no_block_cache = false;
-    opt->block_cache = rocksdb::NewLRUCache(jcache_size);
-  } else {
-    opt->no_block_cache = true;
-    opt->block_cache = nullptr;
-  }
-
-  rocksdb::DB* db = nullptr;
-  const char* db_path = env->GetStringUTFChars(jdb_path, 0);
-  rocksdb::Status s = rocksdb::DB::Open(*opt, db_path, &db);
-  env->ReleaseStringUTFChars(jdb_path, db_path);
-
-  if (s.ok()) {
-    rocksdb::RocksDBJni::setHandle(env, jdb, db);
-    return;
-  }
-  rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+  JNIEnv* env, jobject jdb, jlong jopt_handle,
+  jlong jcache_size, jstring jdb_path) {
+    auto opt = reinterpret_cast<rocksdb::Options*>(jopt_handle);
+    if (jcache_size > 0) {
+        opt->no_block_cache = false;
+        opt->block_cache = rocksdb::NewLRUCache(jcache_size);
+    } else {
+        opt->no_block_cache = true;
+        opt->block_cache = nullptr;
+    }
+    
+    rocksdb::DB* db = nullptr;
+    const char* db_path = env->GetStringUTFChars(jdb_path, 0);
+    rocksdb::Status s = rocksdb::DB::Open(*opt, db_path, &db);
+    env->ReleaseStringUTFChars(jdb_path, db_path);
+    
+    if (s.ok()) {
+        rocksdb::RocksDBJni::setHandle(env, jdb, db);
+        return;
+    }
+    rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -429,8 +473,15 @@ void Java_org_rocksdb_RocksDB_disposeInternal(
  * Signature: (J)J
  */
 jlong Java_org_rocksdb_RocksDB_iterator0(
-    JNIEnv* env, jobject jdb, jlong db_handle) {
-  auto db = reinterpret_cast<rocksdb::DB*>(db_handle);
-  rocksdb::Iterator* iterator = db->NewIterator(rocksdb::ReadOptions());
+    JNIEnv* env, jobject jdb, jlong db_handle, jlong fam_handle) {
+    auto db = reinterpret_cast<rocksdb::DB*>(db_handle);
+  rocksdb::Iterator* iterator = nullptr;
+    if(fam_handle == 0){
+        iterator = db->NewIterator(rocksdb::ReadOptions());
+    } else {
+        auto fam = reinterpret_cast<rocksdb::ColumnFamilyHandle*>(fam_handle);
+        iterator = db->NewIterator(rocksdb::ReadOptions(), fam);
+    }
+  
   return reinterpret_cast<jlong>(iterator);
 }

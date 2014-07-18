@@ -20,6 +20,7 @@ public class RocksEnv extends RocksObject {
     default_env_ = new RocksEnv(getDefaultEnvInternal());
   }
   private static native long getDefaultEnvInternal();
+  private static native long getHdfsEnvInternal(String hdfsPath);
 
   /**
    * Returns the default environment suitable for the current operating
@@ -32,6 +33,10 @@ public class RocksEnv extends RocksObject {
    */
   public static RocksEnv getDefault() {
     return default_env_;
+  }
+  
+  public static RocksEnv getHdfsEnv(String hdfsPath) {
+    return new RocksEnv(getHdfsEnvInternal(hdfsPath));
   }
 
   /**

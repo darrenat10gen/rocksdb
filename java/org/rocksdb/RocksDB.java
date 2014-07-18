@@ -114,6 +114,20 @@ public class RocksDB extends RocksObject {
     return db;
   }
 
+  /**
+   * The factory constructor of RocksDB that opens a RocksDB instance for 
+   * reading a specific column family only.
+   */
+  public static RocksDB openColumnFamilyForRead(Options options, String dbpath, String familyName)
+      throws RocksDBException {
+
+    RocksDB db = new RocksDB();
+    long column = db.openColumnFamilyRead(options.nativeHandle_, options.cacheSize_, dbpath, familyName);
+    db.familyHandle_ = column;
+    db.transferCppRawPointersOwnershipFrom(options);
+    return db;
+  }
+
   @Override protected void disposeInternal() {
     assert(isInitialized());
     disposeInternal(nativeHandle_);
@@ -310,7 +324,7 @@ public class RocksDB extends RocksObject {
    * @return instance of iterator object.
    */
   public RocksIterator newIterator() {
-    return new RocksIterator(iterator0(nativeHandle_));
+    return new RocksIterator(iterator0(nativeHandle_, familyHandle_));
   }
 
   /**
@@ -332,6 +346,8 @@ public class RocksDB extends RocksObject {
   }
 
   // native methods
+  protected native long openColumnFamilyRead(
+      long optionsHandle, long cacheSize, String path, String family) throws RocksDBException;
   protected native void open(
       long optionsHandle, long cacheSize, String path) throws RocksDBException;
   protected native void put(
@@ -363,8 +379,9 @@ public class RocksDB extends RocksObject {
   protected native void remove(
       long handle, long writeOptHandle,
       byte[] key, int keyLen) throws RocksDBException;
-  protected native long iterator0(long optHandle);
+  protected native long iterator0(long optHandle, long familyHandle);
   private native void disposeInternal(long handle);
 
   protected Filter filter_;
+  protected long familyHandle_ = 0;
 }
